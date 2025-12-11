@@ -1,3 +1,6 @@
+## Difference with Geth
+Reth's memory overylay is only 2 layers (should_persist condition), while Geth's default memory layer is 128. So, for mid-reorg (>2 & <128) Reth has to replay the change sets in DB.
+
 ## Database initialization
 ```rust
 // bin/reth/src/main.rs
