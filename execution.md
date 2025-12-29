@@ -21,3 +21,13 @@
                 => state_provider = CachedStateProvider::new_with_caches(state_provider,  handle.caches():prewardingCache)
                 => self.execute_block(&state_provider, env, &input, &mut handle)
 ```
+
+## Pre-warming
+```rust
+// crates/engine/tree/src/tree/payload_validator.rs#L298
+- validate_block_with_state
+    - self.spawn_payload_processor
+        - self.payload_processor.spawn_cache_exclusive
+        // crates/engine/tree/src/tree/payload_processor/mod.rs#L275
+        - spawn_cache_exclusive => self.spawn_caching_with => prewarm_task.run
+```
