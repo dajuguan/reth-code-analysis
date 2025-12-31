@@ -45,3 +45,8 @@ Cli::<EthereumChainSpecParser, RessArgs>::parse().run
                 - self.on_save_blocks => provider_rw.save_blocks
 
 ```
+
+## Why dupsort table on PlainStorage?
+
+From MDBX pespective, SubKey is just the prefix of the (sorted, duplicate) values.
+从libmdbx这种db层面只有kv映射，所以实际上对于PlainStorage这种语义上的addr=>(slot key=> slot value)映射关系，在底层会被转换为 addr=> multiple(slotKey+slotValue)的物理存储，也就是说slotKey只是DB存储value的prefix。所以只能先删掉相同的prefix再插入具体的value才是正确的更新storage value的语义
