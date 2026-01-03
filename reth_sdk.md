@@ -1,0 +1,3 @@
+- [reth doc](https://reth.rs/sdk) 
+- [bera-chain:Building Modular Execution Clients on Reth](https://zorz.substack.com/p/what-does-modularity-mean-in-reth)
+- [How to Build Custom RPC Methods with Reth](https://www.quicknode.com/guides/infrastructure/build-custom-rpc-methods-with-reth)
