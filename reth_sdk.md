@@ -28,9 +28,9 @@ NodeBuilder::new()
   .with_engine(BscEngine)
   .build()
 ```
-- 没有“插件目录”
-- 没有“加载”
-- 只有类型组合
+- No "plugin directory"
+- No "loading" step
+- Only type-level composition
 
 
 # References
