@@ -22,6 +22,118 @@
                 => self.execute_block(&state_provider, env, &input, &mut handle)
 ```
 
+
+## validate payload 
+```
+crates/engine/tree/src/tree/payload_validator.rs (EngineValidator trait)
+    - validate_payload -> validate_block_with_state
+    - self.tx_iterator_for(&input)
+        - txs = spawn_payload_processor
+            - spawn_cache_exclusive  -> spawn_cache_exclusive
+                -> spawn_tx_iterator
+                    -> let tx = convert.convert(tx);  # inner call RecoveredInBlock::new -> recover_signer
+                    let tx = tx.map(|tx| {
+                        let (tx_env, tx) = tx.into_parts();  # inner call to_tx_env
+                        WithTxEnv { tx_env, tx: Arc::new(tx) }
+                    });
+```
+
+### signature validation core process
+```
+Tempo:收到新区块
+   └─ executor/actor.rs:509  engine_handle.new_payload(TempoExecutionData{block, validator_set})
+      │
+      ▼
+Engine tree 主循环 (okx-reth-cp/crates/engine/tree/src/tree/mod.rs:2572)
+   └─ payload_validator.validate_payload(payload, ctx)
+      │
+      ▼
+EngineValidator::validate_payload (okx-reth-cp/.../payload_validator.rs ~ L1517 起)
+   ├─ ① 让 EvmConfig 给出 tx 迭代器
+   │     payload_validator.rs:428      let txs = self.tx_iterator_for(&input)?;
+   │     payload_validator.rs:250-256  match Payload(p) => evm_config.tx_iterator_for_payload(p)
+   │                                   ↓
+   │     【tempo】crates/evm/src/engine.rs:37-55  TempoEvmConfig::tx_iterator_for_payload
+   │       ├─ 遍历 block.body().transactions, 给每个 tx 打包 (block, idx, expiring_nonce_idx)
+   │       └─ 返回元组 (Vec<...>, RecoveredInBlock::new)   ← 闭包"待发射"
+   │
+   ├─ ② 调度执行：把迭代器交给 payload_processor
+   │     payload_validator.rs:450      spawn_payload_processor(env, txs, ...)
+   │     payload_processor/mod.rs:323  PayloadProcessor::spawn(...)
+   │     payload_processor/mod.rs:341  let (prewarm_rx, execution_rx) = self.spawn_tx_iterator(txs, n)
+   │
+   ├─ ③ ★实际"开火"点★ spawn_tx_iterator
+   │     payload_processor/mod.rs:473-554
+   │       (1) let (transactions, convert) = transactions.into_parts();
+   │           //   transactions = Vec<(Arc<SealedBlock>, idx, Option<usize>)>
+   │           //   convert      = RecoveredInBlock::new  (我们 tempo 的闭包!)
+   │       (2) 对每个 raw item 调  convert.convert(tx)
+   │           分两条路径:
+   │             - txs < 30 :  spawn_blocking 内 for 循环顺序跑
+   │             - txs ≥ 30 :  rayon.into_par_iter().for_each_with(...) 并行跑
+   │           每个 item 内部:
+   │              tx ─┐
+   │                  ├─→ convert(tx)        // RecoveredInBlock::new 在这里被调
+   │                  └─→ tx.into_parts()    // 取出 (tx_env, recovered_tx)
+   │
+   ▼
+【tempo】crates/evm/src/engine.rs:70-80
+RecoveredInBlock::new((block, index, expiring_nonce_idx))
+   └─ let sender = block.body().transactions[index].try_recover()?
+                                                    │
+                                                    ▼ 触发 SignerRecoverable
+      crates/primitives/src/transaction/envelope.rs:268-286
+      impl SignerRecoverable for TempoTxEnvelope
+        match self {
+          ...
+          Self::AA(tx) => SignerRecoverable::recover_signer(tx)  ← 外层签名恢复
+        }
+   └─ 返回 RecoveredInBlock { block, index, sender, expiring_nonce_idx }
+                                            ^^^^^^
+                                            这是 caller (外签者)
+   │
+   ▼
+【tempo】crates/evm/src/engine.rs:104-110
+ExecutableTxParts::into_parts(self)  ← 框架紧接着调用
+   └─ (self.to_tx_env(), self)
+        │
+        ▼
+【tempo】crates/evm/src/engine.rs:93-102
+RecoveredInBlock::to_tx_env
+   └─ TempoTxEnv::from_recovered_tx(self.tx(), *self.signer())
+                                                ^^^^^^^^^^^^^^^
+                                                把 caller 传下去
+        │
+        ▼ TempoTxEnvelope::AA 分支
+【tempo】crates/revm/src/tx.rs:372-386
+FromRecoveredTx<TempoTxEnvelope> for TempoTxEnv
+   └─ TempoTxEnvelope::AA(tx) => Self::from_recovered_tx(tx, sender)
+        │
+        ▼  转去 AASigned 重载
+【tempo】crates/revm/src/tx.rs:271-369
+FromRecoveredTx<AASigned> for TempoTxEnv
+   ├─ 解构 TempoTransaction 各字段
+   ├─ ★第二处签名恢复★  tx.rs:340-341
+   │     fee_payer: fee_payer_signature.map(|sig|
+   │         secp256k1::recover_signer(&sig, tx.fee_payer_signature_hash(caller)).ok())
+   │     // 把外层 caller 编进 hash —— 这就是为啥必须先恢复外签名再恢复 payer
+   ├─ 同时对 tempo_authorization_list 每条做 recover_authority()  (tx.rs:327)
+   └─ 装出 TempoTxEnv { caller, fee_payer, tempo_tx_env, ... }
+
+   ▼
+④ 框架把 (tx_env, recovered_tx) 包成 WithTxEnv 通过两条 channel 流出:
+     payload_processor/mod.rs:497-506
+        prewarm_tx.send(...)   →  prewarming 任务 (预热账户/storage cache)
+        ooo_tx.send((idx, ...)) → 排序后送 execute_tx (按 idx 顺序)
+
+   ▼
+⑤ 执行阶段从 execution_rx 拉 tx 一笔笔进 EVM
+     execute_block → BlockExecutor → TempoEvm.transact(tx_env)
+       └─ Handler::validate_transaction (revm/src/handler.rs:1774)
+            ├─ validate_env (handler.rs:1551)   ← 用上面恢复好的 fee_payer
+            └─ pre_execution                     ← 扣 gas、改 nonce 等
+```
+
 ## ChainOrchestrator: the central scheduler that coordinates Backfill (historical sync) and the EngineHandler (live sync).
 ```rust
 // crates/engine/service/src/service.rs:72, create the ChainOrchestrator
