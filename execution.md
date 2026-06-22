@@ -20,6 +20,27 @@
                 => provider_builder.build() => state_provider= MemoryOverlayStateProvider::new(provider, overlay) 
                 => state_provider = CachedStateProvider::new_with_caches(state_provider,  handle.caches():prewardingCache)
                 => self.execute_block(&state_provider, env, &input, &mut handle)
+                    => self.evm_config.create_executor(evm, ctx)
+                    => self.metrics.execute_metered(executor: BlockExecutor, txs)
+                        => BlockExecutor trait's execute_transaction_without_commit
+                            => Evm trait's self.evm.transact
+                                => Evm trait's transact_raw
+                                    alloy_op_evm::OpEvm::transact_raw                      alloy-op-evm/src/lib.rs:148
+                                    └─ self.inner.transact(OpTx(tx))                     // inner = op_revm::OpEvm
+                                            │  // revm ExecuteEvm trait 的默认方法
+                                            └─ ExecuteEvm::transact                        revm-handler-18.1.0/src/api.rs:68
+                                                └─ self.transact_one(tx)                  // ← op-revm 覆盖了它
+                                                    └─ op_revm 的 transact_one           op-revm/src/api/exec.rs:67
+                                                        ├─ self.0.ctx.set_tx(tx)        // 把 tx 塞进 Context
+                                                        ├─ let mut h = OpHandler::new()  // ← 在这里实例化 OpHandler
+                                                        └─ h.run(self)                  // ← 进入 Handler trait
+                                                                └─ Handler::run            revm-handler-18.1.0/src/handler.rs:97
+                                                                    └─ run_without_catch_error            handler.rs:150
+                                                                        ├─ self.validate(evm)            // validate_env + validate_initial_tx_gas
+                                                                        ├─ self.pre_execution(evm, ..)   // → validate_against_state_and_deduct_caller
+                                                                        ├─ self.execution(evm, ..)
+                                                                        ├─ self.post_execution(evm, ..)  // → refund / reward_beneficiary
+                                                                        └─ self.execution_result(evm, ..)
 ```
 
 
@@ -33,7 +54,7 @@ crates/engine/tree/src/tree/payload_validator.rs (EngineValidator trait)
                 -> spawn_tx_iterator
                     -> let tx = convert.convert(tx);  # inner call RecoveredInBlock::new -> recover_signer
                     let tx = tx.map(|tx| {
-                        let (tx_env, tx) = tx.into_parts();  # inner call to_tx_env
+                        let (tx_env, tx) = tx.into_parts();  # inner call to_tx_env -> from_recovered_tx
                         WithTxEnv { tx_env, tx: Arc::new(tx) }
                     });
 ```
